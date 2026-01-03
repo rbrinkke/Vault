@@ -1,0 +1,15 @@
+[Unit]
+Description=Vault demo app (systemd credentials)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/goamet/vault/demo/demo_app.sh
+
+# Basic hardening for the demo
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

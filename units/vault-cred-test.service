@@ -1,0 +1,16 @@
+[Unit]
+Description=Vault credential test (dev)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/goamet/vault/scripts/cred_test.sh db_password
+LoadCredentialEncrypted=db_password:/opt/goamet/vault/credstore/db_password.cred
+
+# Basic hardening for the test
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

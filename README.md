@@ -1,0 +1,61 @@
+# Vault prototype (systemd credentials)
+
+Doel: secrets niet in env, alleen tijdelijk in /run/credentials/%N/.
+Deze setup is dev; je kunt later dezelfde credstore koppelen aan je echte service.
+
+## Prereq
+- systemd 248+
+- systemd-creds
+- TPM2 optioneel (alleen als je daar voor kiest)
+
+## Gebruik (dev)
+1) Maak een encrypted credential:
+   /opt/goamet/vault/scripts/create_cred.sh db_password
+   # optioneel: --with-key=tpm2
+
+2) Test via een transient service (geen installatie nodig):
+   systemd-run --unit vault-cred-test --wait --collect \
+     -p LoadCredentialEncrypted=db_password:/opt/goamet/vault/credstore/db_password.cred \
+     /opt/goamet/vault/scripts/cred_test.sh db_password
+
+3) Of installeer de test unit:
+   cp /opt/goamet/vault/units/vault-cred-test.service /etc/systemd/system/
+   systemctl daemon-reload
+   systemctl start vault-cred-test.service
+
+## Multi-service ontwerp
+- Alle apps delen 1 credstore in /opt/goamet/vault/credstore
+- Per service een map file in /opt/goamet/vault/services/<service>.conf
+- Genereer een systemd drop-in met /opt/goamet/vault/scripts/render_dropin.sh
+- De drop-in komt in /opt/goamet/vault/units/<service>.service.d/credentials.conf
+- De service-naam mag met of zonder .service (map file gebruikt naam zonder suffix)
+
+### Map file formaat
+- Elke regel: CRED_NAME [ENVVAR]
+- Als ENVVAR is gezet, wijst die naar /run/credentials/%N/CRED_NAME
+- Optioneel: name:path om de cred file locatie te overschrijven
+
+Voorbeeld:
+  db_password DB_PASSWORD_FILE
+  api_token API_TOKEN_FILE
+  #custom_secret:/opt/goamet/vault/credstore/custom_secret.cred CUSTOM_SECRET_FILE
+
+### Drop-in genereren
+  /opt/goamet/vault/scripts/render_dropin.sh myservice
+
+### Drop-in toepassen (optioneel)
+  /opt/goamet/vault/scripts/render_dropin.sh myservice --apply
+
+## Demo
+Zie /opt/goamet/vault/demo/README.md
+
+## Productie richting
+- Voeg LoadCredentialEncrypted toe aan je echte unit.
+- Laat je app secrets uit /run/credentials/%N/NAME lezen.
+- Zet hardening flags in je unit (NoNewPrivileges, ProtectSystem, ProtectHome, PrivateTmp).
+- Auto-start zonder handmatige unlock vereist host key of TPM2.
+  YubiKey/phone kan dan niet verplicht bij boot.
+
+## Opmerking
+- host key encryption beschermt tegen casual exposure/backups, niet tegen root op dezelfde host.
+- Als host key nog niet bestaat: systemd-creds setup
