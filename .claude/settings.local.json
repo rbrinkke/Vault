@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(ssh thin:*)",
-      "Bash(rsync:*)"
+      "Bash(rsync:*)",
+      "Bash(shellcheck:*)"
     ]
   }
 }
