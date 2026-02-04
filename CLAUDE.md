@@ -56,6 +56,15 @@ Zie /opt/goamet/vault/demo/README.md
 - Auto-start zonder handmatige unlock vereist host key of TPM2.
   YubiKey/phone kan dan niet verplicht bij boot.
 
+## Security samenvatting
+- Threat model: beschermt tegen disk/backups, niet tegen root op dezelfde host.
+- Access control: `credstore/` 0700, `vault.toml`/`audit.log` 0600, CLI met `umask 077`, alleen root/sudo.
+- CLI safety: `get` alleen met expliciete confirmatie, geen secrets naar stdout/logs.
+- Audit: alleen metadata, append-only, voorkeur voor hash chaining of journal logging.
+- Backups: versleuteld met expliciete key policy en gelogde restore.
+- Drop-in hardening: minimaal `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`.
+- Operational: rotatie/migratie met verify en rollback (oude cred pas weg na succes).
+
 ## Opmerking
 - host key encryption beschermt tegen casual exposure/backups, niet tegen root op dezelfde host.
 - Als host key nog niet bestaat: systemd-creds setup
