@@ -1,3 +1,5 @@
+//! Credential metadata model.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -12,4 +14,14 @@ pub struct CredentialMeta {
     pub tags: Vec<String>,
     #[serde(default)]
     pub services: Vec<String>,
+}
+
+impl std::fmt::Display for CredentialMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(desc) = &self.description {
+            write!(f, " ({})", desc)?;
+        }
+        Ok(())
+    }
 }

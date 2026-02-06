@@ -1,27 +1,64 @@
-use crate::core::{credstore, metadata};
-use crate::core::paths::VaultPaths;
+use crate::cli::CliContext;
+use crate::constants;
+use crate::core::{credstore, file_lock::FileLock, metadata};
 use crate::models::credential::CredentialMeta;
+use crate::models::policy::PolicySection;
 use crate::util::{fs as vault_fs, systemd};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Utc};
-use clap::Args;
+use clap::{Args, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Table};
 use dialoguer::Password;
 use rand::{distributions::Alphanumeric, rngs::OsRng, Rng};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
+use tempfile::{self, NamedTempFile};
+use zeroize::Zeroizing;
+
+fn parse_credential_name(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("name cannot be empty".into());
+    }
+    if s.contains("..") {
+        return Err("path traversal not allowed".into());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err("only [a-zA-Z0-9._-] allowed".into());
+    }
+    Ok(s.to_string())
+}
+
+fn parse_with_key(s: &str) -> Result<String, String> {
+    if constants::VALID_KEY_TYPES.contains(&s) {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "invalid key type '{}', must be one of: {}",
+            s,
+            constants::VALID_KEY_TYPES.join(", ")
+        ))
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct CreateArgs {
     /// Credential name
+    #[arg(value_parser = parse_credential_name)]
     pub name: String,
 
-    /// Key to use for encryption (host|tpm2|host+tpm2|auto)
-    #[arg(long, default_value = "host")]
-    pub with_key: String,
+    /// Key to use for encryption (host|tpm2|host+tpm2|auto; default: host+tpm2 if TPM2 available)
+    #[arg(long, value_parser = parse_with_key)]
+    pub with_key: Option<String>,
+
+    /// TPM2 PCR values to bind to (advanced, e.g. "7" or "7+11")
+    #[arg(long, value_name = "PCRS")]
+    pub tpm2_pcrs: Option<String>,
 
     /// Read secret from stdin instead of interactive prompt
     #[arg(long)]
@@ -43,6 +80,7 @@ pub struct CreateArgs {
 #[derive(Args, Debug)]
 pub struct GetArgs {
     /// Credential name
+    #[arg(value_parser = parse_credential_name)]
     pub name: String,
 
     /// Output file (avoid stdout)
@@ -80,12 +118,14 @@ pub struct ListArgs {
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
     /// Credential name
+    #[arg(value_parser = parse_credential_name)]
     pub name: String,
 }
 
 #[derive(Args, Debug)]
 pub struct DescribeArgs {
     /// Credential name
+    #[arg(value_parser = parse_credential_name)]
     pub name: String,
 }
 
@@ -98,11 +138,16 @@ pub struct SearchArgs {
 #[derive(Args, Debug)]
 pub struct RotateArgs {
     /// Credential name
+    #[arg(value_parser = parse_credential_name)]
     pub name: String,
 
-    /// Key to use for encryption (host|tpm2|host+tpm2|auto)
-    #[arg(long, default_value = "host")]
-    pub with_key: String,
+    /// Key to use for encryption (host|tpm2|host+tpm2|auto; default: host+tpm2 if TPM2 available)
+    #[arg(long, value_parser = parse_with_key)]
+    pub with_key: Option<String>,
+
+    /// TPM2 PCR values to bind to (advanced, e.g. "7" or "7+11")
+    #[arg(long, value_name = "PCRS")]
+    pub tpm2_pcrs: Option<String>,
 
     /// Read secret from stdin instead of interactive prompt
     #[arg(long)]
@@ -129,6 +174,19 @@ pub struct RotateArgs {
     pub service: Vec<String>,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum RollbackCommand {
+    /// Rollback a rotated credential to its previous version
+    Rotate(RollbackRotateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RollbackRotateArgs {
+    /// Credential name
+    #[arg(value_parser = parse_credential_name)]
+    pub name: String,
+}
+
 #[derive(Serialize)]
 struct ListItem {
     name: String,
@@ -139,21 +197,50 @@ struct ListItem {
     modified: Option<String>,
 }
 
-pub fn run_create(paths: &VaultPaths, args: CreateArgs) -> Result<()> {
-    validate_name(&args.name)?;
-    vault_fs::ensure_dir(&paths.credstore, 0o700)?;
+/// Check key-type policy: forbid host-only when TPM2 is available.
+fn check_key_policy(policy: &PolicySection, with_key: &str) -> Result<()> {
+    if policy.forbid_host_only_when_tpm2
+        && with_key == "host"
+        && systemd::has_tpm2().unwrap_or(false)
+    {
+        bail!("policy: host-only encryption forbidden when TPM2 is available (use host+tpm2)");
+    }
+    Ok(())
+}
+
+pub fn run_create(ctx: &CliContext, args: CreateArgs) -> Result<()> {
+    let paths = &ctx.paths;
+    vault_fs::ensure_dir(&paths.credstore, constants::CREDSTORE_DIR_MODE)?;
+
+    let with_key = resolve_key_type(args.with_key.as_deref());
+    check_key_policy(&ctx.policy, &with_key)?;
+
+    // Policy: service allowlist (for metadata linkage)
+    if !args.service.is_empty() {
+        for svc in &args.service {
+            if !ctx.policy.is_service_allowed(svc) {
+                bail!(
+                    "policy: service '{}' not allowed (service_allowlist enforced)",
+                    svc
+                );
+            }
+        }
+    }
+
+    // Non-interactive mode requires --from-stdin
+    if ctx.non_interactive && !args.from_stdin {
+        bail!("--non-interactive requires --from-stdin for create");
+    }
 
     let secret = read_secret(args.from_stdin, &args.name)?;
 
-    let mut tmp = NamedTempFile::new().context("create temp file")?;
-    tmp.write_all(secret.as_bytes())
-        .context("write temp secret")?;
-    tmp.flush().ok();
+    let tmp = write_temp_secret(&secret, &paths.credstore)?;
 
-    let output = paths.credstore.join(format!("{}.cred", args.name));
-    systemd::encrypt(&args.with_key, &args.name, tmp.path(), &output)?;
-    vault_fs::set_permissions(&output, 0o600)?;
+    let output = paths.credstore.join(format!("{}{}", args.name, constants::CRED_EXTENSION));
+    systemd::encrypt(&with_key, &args.name, tmp.path(), &output, args.tpm2_pcrs.as_deref())?;
+    vault_fs::set_permissions(&output, constants::CRED_FILE_MODE)?;
 
+    let _vault_lock = FileLock::exclusive(&paths.vault_lock)?;
     let mut vault = metadata::load(&paths.vault_toml)?;
     metadata::ensure_vault_section(&mut vault, Some(paths.credstore.display().to_string()));
     let now = Utc::now();
@@ -170,7 +257,7 @@ pub fn run_create(paths: &VaultPaths, args: CreateArgs) -> Result<()> {
         meta.created_at = Some(now);
     }
     meta.rotated_at = Some(now);
-    meta.encryption_key = Some(args.with_key.clone());
+    meta.encryption_key = Some(with_key);
     if let Some(desc) = args.description {
         meta.description = Some(desc);
     }
@@ -182,21 +269,24 @@ pub fn run_create(paths: &VaultPaths, args: CreateArgs) -> Result<()> {
     }
     metadata::upsert_credential(&mut vault, meta);
     metadata::save(&paths.vault_toml, &vault)?;
+    ctx.audit_simple("create", &args.name);
 
     println!("Wrote {}", output.display());
     Ok(())
 }
 
-pub fn run_get(paths: &VaultPaths, args: GetArgs) -> Result<()> {
-    validate_name(&args.name)?;
-    let cred_path = paths.credstore.join(format!("{}.cred", args.name));
+pub fn run_get(ctx: &CliContext, args: GetArgs) -> Result<()> {
+    let paths = &ctx.paths;
+    let cred_path = paths.credstore.join(format!("{}{}", args.name, constants::CRED_EXTENSION));
     if !cred_path.is_file() {
         bail!("credential not found: {}", cred_path.display());
     }
 
+    ctx.audit_simple("get", &args.name);
+
     if let Some(output) = args.output {
         systemd::decrypt_to_file(&cred_path, &output)?;
-        vault_fs::set_permissions(&output, 0o600).ok();
+        vault_fs::set_permissions(&output, constants::CRED_FILE_MODE)?;
         println!("Wrote {}", output.display());
         return Ok(());
     }
@@ -211,11 +301,12 @@ pub fn run_get(paths: &VaultPaths, args: GetArgs) -> Result<()> {
     let data = systemd::decrypt_to_stdout(&cred_path, Some(args.newline.as_str()))?;
     let mut stdout = std::io::stdout();
     stdout.write_all(&data).context("write to stdout")?;
-    stdout.flush().ok();
+    stdout.flush().context("flush stdout")?;
     Ok(())
 }
 
-pub fn run_list(paths: &VaultPaths, args: ListArgs) -> Result<()> {
+pub fn run_list(ctx: &CliContext, args: ListArgs) -> Result<()> {
+    let paths = &ctx.paths;
     if args.format != "table" && args.format != "json" {
         bail!("invalid format: {} (use table|json)", args.format);
     }
@@ -235,7 +326,7 @@ pub fn run_list(paths: &VaultPaths, args: ListArgs) -> Result<()> {
                     continue;
                 }
             }
-            let cred_path = paths.credstore.join(format!("{}.cred", meta.name));
+            let cred_path = paths.credstore.join(format!("{}{}", meta.name, constants::CRED_EXTENSION));
             let (size_bytes, modified) = if cred_path.is_file() {
                 let meta_fs = fs::metadata(&cred_path).ok();
                 let size = meta_fs.as_ref().map(|m| m.len());
@@ -327,14 +418,17 @@ pub fn run_list(paths: &VaultPaths, args: ListArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run_delete(paths: &VaultPaths, args: DeleteArgs) -> Result<()> {
-    validate_name(&args.name)?;
-    let cred_path = paths.credstore.join(format!("{}.cred", args.name));
+pub fn run_delete(ctx: &CliContext, args: DeleteArgs) -> Result<()> {
+    let paths = &ctx.paths;
+    let cred_path = paths.credstore.join(format!("{}{}", args.name, constants::CRED_EXTENSION));
     if !cred_path.exists() {
         bail!("credential not found: {}", cred_path.display());
     }
+
+    let _vault_lock = FileLock::exclusive(&paths.vault_lock)?;
     fs::remove_file(&cred_path)
         .with_context(|| format!("remove {}", cred_path.display()))?;
+    ctx.audit_simple("delete", &args.name);
 
     if paths.vault_toml.exists() {
         let mut vault = metadata::load(&paths.vault_toml)?;
@@ -346,8 +440,8 @@ pub fn run_delete(paths: &VaultPaths, args: DeleteArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run_describe(paths: &VaultPaths, args: DescribeArgs) -> Result<()> {
-    validate_name(&args.name)?;
+pub fn run_describe(ctx: &CliContext, args: DescribeArgs) -> Result<()> {
+    let paths = &ctx.paths;
     if !paths.vault_toml.exists() {
         bail!("metadata not found: {}", paths.vault_toml.display());
     }
@@ -381,7 +475,8 @@ pub fn run_describe(paths: &VaultPaths, args: DescribeArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run_search(paths: &VaultPaths, args: SearchArgs) -> Result<()> {
+pub fn run_search(ctx: &CliContext, args: SearchArgs) -> Result<()> {
+    let paths = &ctx.paths;
     if !paths.vault_toml.exists() {
         bail!("metadata not found: {}", paths.vault_toml.display());
     }
@@ -430,16 +525,49 @@ pub fn run_search(paths: &VaultPaths, args: SearchArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run_rotate(paths: &VaultPaths, args: RotateArgs) -> Result<()> {
-    validate_name(&args.name)?;
-    vault_fs::ensure_dir(&paths.credstore, 0o700)?;
+pub fn run_rotate(ctx: &CliContext, args: RotateArgs) -> Result<()> {
+    let paths = &ctx.paths;
+    vault_fs::ensure_dir(&paths.credstore, constants::CREDSTORE_DIR_MODE)?;
+
+    let with_key = resolve_key_type(args.with_key.as_deref());
+    check_key_policy(&ctx.policy, &with_key)?;
+
+    // Policy: service allowlist (for metadata linkage)
+    if !args.service.is_empty() {
+        for svc in &args.service {
+            if !ctx.policy.is_service_allowed(svc) {
+                bail!(
+                    "policy: service '{}' not allowed (service_allowlist enforced)",
+                    svc
+                );
+            }
+        }
+    }
 
     if args.auto && args.from_stdin {
         bail!("--auto and --from-stdin cannot be used together");
     }
 
-    let secret = if args.auto {
-        generate_secret(args.length)
+    // Non-interactive mode requires --from-stdin or --auto
+    if ctx.non_interactive && !args.from_stdin && !args.auto {
+        bail!("--non-interactive requires --from-stdin or --auto for rotate");
+    }
+
+    // Policy: minimum auto-secret length
+    if args.auto {
+        if let Some(min_len) = ctx.policy.min_auto_secret_length {
+            if args.length < min_len {
+                bail!(
+                    "policy: auto-generated secret length {} below minimum {} (set in vault.toml [policy])",
+                    args.length,
+                    min_len
+                );
+            }
+        }
+    }
+
+    let secret: Zeroizing<String> = if args.auto {
+        Zeroizing::new(generate_secret(args.length))
     } else {
         read_secret(args.from_stdin, &args.name)?
     };
@@ -448,14 +576,35 @@ pub fn run_rotate(paths: &VaultPaths, args: RotateArgs) -> Result<()> {
         bail!("secret is empty");
     }
 
-    let tmp_output = temp_output_path(&paths.credstore)?;
-    let tmp_secret = write_temp_secret(&secret)?;
-    systemd::encrypt(&args.with_key, &args.name, tmp_secret.path(), &tmp_output)?;
+    let tmp_secret = write_temp_secret(&secret, &paths.credstore)?;
+    let tmp_output = tempfile::Builder::new()
+        .prefix("cred-")
+        .suffix(".cred.tmp")
+        .tempfile_in(&paths.credstore)
+        .context("create temp output")?;
+    systemd::encrypt(&with_key, &args.name, tmp_secret.path(), tmp_output.path(), args.tpm2_pcrs.as_deref())?;
 
-    let final_path = paths.credstore.join(format!("{}.cred", args.name));
-    fs::rename(&tmp_output, &final_path)
-        .with_context(|| format!("replace {}", final_path.display()))?;
-    vault_fs::set_permissions(&final_path, 0o600)?;
+    let _vault_lock = FileLock::exclusive(&paths.vault_lock)?;
+    let final_path = paths.credstore.join(format!("{}{}", args.name, constants::CRED_EXTENSION));
+
+    // Create .prev backup before overwriting
+    let prev_path = paths.credstore.join(format!("{}{}.prev", args.name, constants::CRED_EXTENSION));
+    if final_path.is_file() {
+        fs::copy(&final_path, &prev_path)
+            .with_context(|| format!("backup {} to .prev", final_path.display()))?;
+    }
+
+    match tmp_output.persist(&final_path) {
+        Ok(_) => {}
+        Err(e) => {
+            // Restore from backup on failure
+            if prev_path.is_file() {
+                let _ = fs::rename(&prev_path, &final_path);
+            }
+            bail!("persist rotated credential: {}", e);
+        }
+    }
+    vault_fs::set_permissions(&final_path, constants::CRED_FILE_MODE)?;
 
     let mut vault = metadata::load(&paths.vault_toml)?;
     metadata::ensure_vault_section(&mut vault, Some(paths.credstore.display().to_string()));
@@ -473,7 +622,7 @@ pub fn run_rotate(paths: &VaultPaths, args: RotateArgs) -> Result<()> {
         meta.created_at = Some(now);
     }
     meta.rotated_at = Some(now);
-    meta.encryption_key = Some(args.with_key.clone());
+    meta.encryption_key = Some(with_key);
     if let Some(desc) = args.description {
         meta.description = Some(desc);
     }
@@ -485,11 +634,37 @@ pub fn run_rotate(paths: &VaultPaths, args: RotateArgs) -> Result<()> {
     }
     metadata::upsert_credential(&mut vault, meta);
     metadata::save(&paths.vault_toml, &vault)?;
+    ctx.audit_simple("rotate", &args.name);
 
     println!("Rotated {}", final_path.display());
     Ok(())
 }
 
+pub fn run_rollback(ctx: &CliContext, cmd: RollbackCommand) -> Result<()> {
+    match cmd {
+        RollbackCommand::Rotate(args) => run_rollback_rotate(ctx, args),
+    }
+}
+
+fn run_rollback_rotate(ctx: &CliContext, args: RollbackRotateArgs) -> Result<()> {
+    let paths = &ctx.paths;
+    let _vault_lock = FileLock::exclusive(&paths.vault_lock)?;
+    let cred_path = paths.credstore.join(format!("{}{}", args.name, constants::CRED_EXTENSION));
+    let prev_path = paths.credstore.join(format!("{}{}.prev", args.name, constants::CRED_EXTENSION));
+
+    if !prev_path.is_file() {
+        bail!("no .prev backup found for '{}' — cannot rollback", args.name);
+    }
+
+    fs::rename(&prev_path, &cred_path)
+        .with_context(|| format!("restore {} from .prev", args.name))?;
+
+    ctx.audit_simple("rollback-rotate", &args.name);
+    println!("Rolled back '{}' to previous version", args.name);
+    Ok(())
+}
+
+#[cfg(test)]
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("name cannot be empty");
@@ -509,39 +684,63 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_secret(from_stdin: bool, name: &str) -> Result<String> {
-    if from_stdin {
+/// Resolve the effective key type: use explicit value or auto-detect TPM2.
+fn resolve_key_type(explicit: Option<&str>) -> String {
+    match explicit {
+        Some(k) => k.to_string(),
+        None => {
+            if systemd::has_tpm2().unwrap_or(false) {
+                constants::DEFAULT_KEY_TYPE_WITH_TPM2.to_string()
+            } else {
+                constants::DEFAULT_KEY_TYPE_WITHOUT_TPM2.to_string()
+            }
+        }
+    }
+}
+
+fn read_secret(from_stdin: bool, name: &str) -> Result<Zeroizing<String>> {
+    let secret = if from_stdin {
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("read secret from stdin")?;
-        return Ok(buf.trim_end_matches(['\r', '\n']).to_string());
+        Zeroizing::new(buf.trim_end_matches(['\r', '\n']).to_string())
+    } else {
+        Zeroizing::new(
+            Password::new()
+                .with_prompt(format!("Secret for {}", name))
+                .allow_empty_password(false)
+                .interact()
+                .context("read secret from prompt")?,
+        )
+    };
+    if secret.len() > constants::MAX_SECRET_SIZE {
+        bail!(
+            "secret exceeds maximum size ({} bytes, max {} bytes)",
+            secret.len(),
+            constants::MAX_SECRET_SIZE
+        );
     }
-
-    let secret = Password::new()
-        .with_prompt(format!("Secret for {}", name))
-        .allow_empty_password(false)
-        .interact()
-        .context("read secret from prompt")?;
     Ok(secret)
 }
 
-fn write_temp_secret(secret: &str) -> Result<NamedTempFile> {
-    let mut tmp = NamedTempFile::new().context("create temp file")?;
+fn write_temp_secret(secret: &str, credstore: &Path) -> Result<NamedTempFile> {
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".secret-")
+        .tempfile_in(credstore)
+        .context("create temp file")?;
     tmp.write_all(secret.as_bytes())
         .context("write temp secret")?;
-    tmp.flush().ok();
+    tmp.flush().context("flush temp secret")?;
     Ok(tmp)
 }
 
 fn dedup(values: Vec<String>) -> Vec<String> {
-    let mut out = Vec::new();
-    for val in values {
-        if !out.contains(&val) {
-            out.push(val);
-        }
-    }
-    out
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter(|v| seen.insert(v.clone()))
+        .collect()
 }
 
 fn match_credential(meta: &CredentialMeta, query: &str) -> bool {
@@ -581,16 +780,92 @@ fn generate_secret(length: usize) -> String {
         .collect()
 }
 
-fn temp_output_path(dir: &Path) -> Result<PathBuf> {
-    let tmp = tempfile::Builder::new()
-        .prefix("cred-")
-        .suffix(".cred.tmp")
-        .tempfile_in(dir)
-        .context("create temp output")?;
-    let path = tmp.path().to_path_buf();
-    drop(tmp);
-    if path.exists() {
-        fs::remove_file(&path).ok();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_name_valid() {
+        assert!(validate_name("db_password").is_ok());
+        assert!(validate_name("api.token").is_ok());
+        assert!(validate_name("my-secret-123").is_ok());
     }
-    Ok(path)
+
+    #[test]
+    fn test_validate_name_empty() {
+        assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_path_separators() {
+        assert!(validate_name("../etc").is_err());
+        assert!(validate_name("foo/bar").is_err());
+        assert!(validate_name("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_whitespace() {
+        assert!(validate_name("foo bar").is_err());
+        assert!(validate_name("foo\tbar").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_special_chars() {
+        assert!(validate_name("foo@bar").is_err());
+        assert!(validate_name("foo$bar").is_err());
+        assert!(validate_name("foo!bar").is_err());
+    }
+
+    #[test]
+    fn test_dedup_preserves_order() {
+        let input = vec!["b".into(), "a".into(), "b".into(), "c".into()];
+        assert_eq!(dedup(input), vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn test_dedup_empty() {
+        let input: Vec<String> = vec![];
+        assert_eq!(dedup(input), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_match_credential_by_name() {
+        let meta = CredentialMeta {
+            name: "db_password".into(),
+            ..Default::default()
+        };
+        assert!(match_credential(&meta, "db_pass"));
+    }
+
+    #[test]
+    fn test_match_credential_by_tag() {
+        let meta = CredentialMeta {
+            name: "x".into(),
+            tags: vec!["test".into()],
+            ..Default::default()
+        };
+        assert!(match_credential(&meta, "test"));
+    }
+
+    #[test]
+    fn test_match_credential_case_insensitive() {
+        let meta = CredentialMeta {
+            name: "DB_Password".into(),
+            ..Default::default()
+        };
+        assert!(match_credential(&meta, "db_password"));
+    }
+
+    #[test]
+    fn test_generate_secret_length() {
+        assert_eq!(generate_secret(32).len(), 32);
+        assert_eq!(generate_secret(0).len(), 0);
+        assert_eq!(generate_secret(1).len(), 1);
+    }
+
+    #[test]
+    fn test_generate_secret_alphanumeric() {
+        let s = generate_secret(100);
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
 }

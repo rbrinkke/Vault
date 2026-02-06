@@ -1,3 +1,5 @@
+//! Credential file listing and discovery.
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,7 @@ pub struct CredEntry {
     pub modified: Option<SystemTime>,
 }
 
+/// List all .cred files in the credstore directory.
 pub fn list_credentials(cred_dir: &Path) -> Result<Vec<CredEntry>> {
     let mut entries = Vec::new();
     let dir = fs::read_dir(cred_dir)

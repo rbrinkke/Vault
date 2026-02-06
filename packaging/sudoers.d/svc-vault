@@ -1,0 +1,30 @@
+# Sudoers rules for the svc-vault service account.
+# AI-operator can run read-only and policy-gated commands without password.
+# Break-glass commands (get --confirm, delete) are NEVER allowed for automation.
+#
+# NOTE:
+# - Prefer pinning a fixed vault root: `--root /opt/services/vault`.
+# - Avoid broad wildcards in production; use a wrapper script if you need stricter flag control.
+
+# Read-only commands (AI-allowed)
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault doctor *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault list *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault describe *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault search *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault health *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault audit *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault plan *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault verify *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault dropin generate *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault dropin diff *
+
+# Mutating commands with policy gates (AI-with-policy)
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault create --non-interactive *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault rotate --non-interactive *
+# dropin apply writes to /etc/systemd/system and requires --confirm in the CLI now.
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault dropin apply --confirm *
+svc-vault ALL=(root) NOPASSWD: /usr/local/bin/goamet-vault --root /opt/services/vault migrate import *
+
+# NEVER allowed for svc-vault:
+# - goamet-vault get --confirm  (decrypts secrets)
+# - goamet-vault delete         (permanently removes credentials)

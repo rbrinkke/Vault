@@ -1,5 +1,9 @@
+use crate::cli::CliContext;
+use crate::constants;
 use crate::core::dropin_gen::generate_dropin;
+use crate::core::file_lock::FileLock;
 use crate::core::paths::VaultPaths;
+use crate::util::fs as vault_fs;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use std::fs;
@@ -20,7 +24,7 @@ pub enum DropinCommand {
 pub struct DropinGenerateArgs {
     pub service: String,
 
-    /// Map file to read (default: services/<service>.conf)
+    /// Map file to read (default: `services/<service>.conf`)
     #[arg(long, value_name = "PATH")]
     pub map_file: Option<PathBuf>,
 
@@ -28,7 +32,7 @@ pub struct DropinGenerateArgs {
     #[arg(long, value_name = "PATH")]
     pub cred_dir: Option<PathBuf>,
 
-    /// Output directory for drop-in (default: units/<service>.service.d)
+    /// Output directory for drop-in (default: `units/<service>.service.d`)
     #[arg(long, value_name = "PATH")]
     pub out_dir: Option<PathBuf>,
 
@@ -36,9 +40,9 @@ pub struct DropinGenerateArgs {
     #[arg(long)]
     pub no_env: bool,
 
-    /// Include hardening flags in the drop-in
+    /// Disable hardening flags in the drop-in
     #[arg(long)]
-    pub hardening: bool,
+    pub no_hardening: bool,
 
     /// Also install the drop-in to /etc/systemd/system and reload
     #[arg(long)]
@@ -61,9 +65,13 @@ pub struct DropinApplyArgs {
     #[arg(long)]
     pub no_env: bool,
 
-    /// Include hardening flags in the drop-in
+    /// Disable hardening flags in the drop-in
     #[arg(long)]
-    pub hardening: bool,
+    pub no_hardening: bool,
+
+    /// Required confirmation because this writes to /etc/systemd/system and reloads systemd
+    #[arg(long)]
+    pub confirm: bool,
 }
 
 #[derive(Args, Debug)]
@@ -80,34 +88,49 @@ pub struct DropinDiffArgs {
     #[arg(long)]
     pub no_env: bool,
 
-    /// Include hardening flags in the drop-in
+    /// Disable hardening flags in the drop-in
     #[arg(long)]
-    pub hardening: bool,
+    pub no_hardening: bool,
 }
 
-pub fn run(paths: &VaultPaths, cmd: DropinCommand) -> Result<()> {
+pub fn run(ctx: &CliContext, cmd: DropinCommand) -> Result<()> {
+    let paths = &ctx.paths;
     match cmd {
         DropinCommand::Generate(args) => {
             let apply = args.apply;
-            run_generate(paths, args, apply)
+            run_generate(paths, args, apply, false)
         }
         DropinCommand::Apply(args) => {
+            if !ctx.policy.is_service_allowed(&args.service) {
+                bail!(
+                    "policy: service '{}' not allowed (service_allowlist enforced)",
+                    args.service
+                );
+            }
+            if !args.confirm {
+                bail!("refusing to write to /etc/systemd/system without --confirm");
+            }
             let gen = DropinGenerateArgs {
                 service: args.service,
                 map_file: args.map_file,
                 cred_dir: args.cred_dir,
                 out_dir: args.out_dir,
                 no_env: args.no_env,
-                hardening: args.hardening,
+                no_hardening: args.no_hardening,
                 apply: true,
             };
-            run_generate(paths, gen, true)
+            run_generate(paths, gen, true, true)
         }
         DropinCommand::Diff(args) => run_diff(paths, args),
     }
 }
 
-fn run_generate(paths: &VaultPaths, args: DropinGenerateArgs, apply: bool) -> Result<()> {
+fn run_generate(paths: &VaultPaths, args: DropinGenerateArgs, apply: bool, use_lock: bool) -> Result<()> {
+    let _vault_lock = if use_lock {
+        Some(FileLock::exclusive(&paths.vault_lock)?)
+    } else {
+        None
+    };
     let (unit_name, map_name) = normalize_service_name(&args.service);
 
     let map_file = resolve_path(
@@ -133,7 +156,7 @@ fn run_generate(paths: &VaultPaths, args: DropinGenerateArgs, apply: bool) -> Re
         .with_context(|| format!("create output dir {}", out_dir.display()))?;
     let out_file = out_dir.join("credentials.conf");
 
-    let dropin = generate_dropin(&map_file, &cred_dir, args.no_env, args.hardening)?;
+    let dropin = generate_dropin(&map_file, &cred_dir, args.no_env, !args.no_hardening)?;
     fs::write(&out_file, dropin).with_context(|| format!("write {}", out_file.display()))?;
     println!("Wrote {}", out_file.display());
 
@@ -161,7 +184,7 @@ fn run_diff(paths: &VaultPaths, args: DropinDiffArgs) -> Result<()> {
         bail!("map file not found: {}", map_file.display());
     }
 
-    let generated = generate_dropin(&map_file, &cred_dir, args.no_env, args.hardening)?;
+    let generated = generate_dropin(&map_file, &cred_dir, args.no_env, !args.no_hardening)?;
     let target_file = PathBuf::from(format!(
         "/etc/systemd/system/{}.d/credentials.conf",
         unit_name
@@ -206,6 +229,7 @@ fn apply_dropin(unit_name: &str, source: &Path) -> Result<()> {
         .with_context(|| format!("create {}", target_dir.display()))?;
     fs::copy(source, &target_file)
         .with_context(|| format!("copy to {}", target_file.display()))?;
+    vault_fs::set_permissions(&target_file, constants::CRED_FILE_MODE)?;
 
     if systemctl_available() {
         let status = Command::new("systemctl").arg("daemon-reload").status();

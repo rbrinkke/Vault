@@ -6,3 +6,9 @@ credstore/
 demo/
 .DS_Store
 Thumbs.db
+target/
+*.swp
+*.swo
+*~
+vault.toml
+.claude/

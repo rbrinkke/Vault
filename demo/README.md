@@ -4,18 +4,18 @@ Deze demo laat zien hoe een service secrets uit /run/credentials/%N/ leest
 zonder env-waarden met plaintext secrets.
 
 ## 1) Maak demo secrets (interactief)
-- /opt/goamet/vault/scripts/create_cred.sh db_password
-- /opt/goamet/vault/scripts/create_cred.sh api_token
+- /opt/services/vault/scripts/create_cred.sh db_password
+- /opt/services/vault/scripts/create_cred.sh api_token
 
 ## 2) Genereer drop-in voor de demo service
-- /opt/goamet/vault/scripts/render_dropin.sh vault-demo
+- /opt/services/vault/scripts/render_dropin.sh vault-demo
 
 Dit maakt:
-- /opt/goamet/vault/units/vault-demo.service.d/credentials.conf
+- /opt/services/vault/units/vault-demo.service.d/credentials.conf
 
 ## 3) Installeer de demo unit (optioneel)
-- cp /opt/goamet/vault/units/vault-demo.service /etc/systemd/system/
-- /opt/goamet/vault/scripts/render_dropin.sh vault-demo --apply
+- cp /opt/services/vault/units/vault-demo.service /etc/systemd/system/
+- /opt/services/vault/scripts/render_dropin.sh vault-demo --apply
 - systemctl daemon-reload
 - systemctl start vault-demo.service
 

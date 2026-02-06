@@ -27,7 +27,8 @@ CRED_DIR="$BASE_DIR/credstore"
 mkdir -p "$CRED_DIR"
 
 umask 077
-tmp_file="$(mktemp)"
+# Avoid writing secrets to /tmp; keep them under the (0700) credstore directory.
+tmp_file="$(mktemp -p "$CRED_DIR" ".secret-$NAME-XXXXXX")"
 cleanup() { rm -f "$tmp_file"; }
 trap cleanup EXIT
 

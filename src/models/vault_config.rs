@@ -1,21 +1,17 @@
+//! Vault configuration file model.
+
 use crate::models::credential::CredentialMeta;
+use crate::models::policy::PolicySection;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VaultFile {
     #[serde(default)]
     pub vault: VaultSection,
     #[serde(default)]
+    pub policy: PolicySection,
+    #[serde(default)]
     pub credentials: Vec<CredentialMeta>,
-}
-
-impl Default for VaultFile {
-    fn default() -> Self {
-        Self {
-            vault: VaultSection::default(),
-            credentials: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

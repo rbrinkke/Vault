@@ -3,7 +3,7 @@ Description=Vault demo app (systemd credentials)
 
 [Service]
 Type=oneshot
-ExecStart=/opt/goamet/vault/demo/demo_app.sh
+ExecStart=/opt/services/vault/demo/demo_app.sh
 
 # Basic hardening for the demo
 NoNewPrivileges=yes
