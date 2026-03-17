@@ -35,7 +35,7 @@ pub fn generate_dropin_from_entries(
         if !no_env {
             if let Some(env_var) = &entry.env_var {
                 out.push_str(&format!(
-                    "Environment{}=%d/{}\n",
+                    "Environment={}=%d/{}\n",
                     env_var, entry.cred_name
                 ));
             }
