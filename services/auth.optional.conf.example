@@ -1,0 +1,4 @@
+# Optional auth secrets. Copy to an overlay map only when these credentials exist.
+SMTP_PASSWORD SMTP_PASSWORD_FILE
+SYNC_ENC_KEY_HEX SYNC_ENC_KEY_HEX_FILE
+RUNTIME_KEY_WRAP_KEY RUNTIME_KEY_WRAP_KEY_FILE

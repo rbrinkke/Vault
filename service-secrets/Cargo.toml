@@ -1,0 +1,16 @@
+[package]
+name = "service-secrets"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+secret-vault = { version = "1.18.0", features = ["ring-aead-encryption"] }
+secrecy = "0.10"
+thiserror = "1"
+tracing = "0.1"
+rvstruct = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

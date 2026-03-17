@@ -1,0 +1,2 @@
+# Optional action-executor secrets.
+MONITORING_POSTGRES_URL MONITORING_POSTGRES_URL_FILE

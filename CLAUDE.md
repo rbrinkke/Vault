@@ -1,73 +1,42 @@
-# Vault prototype (systemd credentials)
+# goamet-vault notes
 
-Doel: secrets niet in env, alleen tijdelijk in /run/credentials/%N/.
-Deze setup is dev; je kunt later dezelfde credstore koppelen aan je echte service.
+## Wat dit repo wel en niet doet
+- `goamet-vault` levert encrypted credentials aan `systemd`.
+- Rust-services horen secrets in-process te laden via `/opt/app/vault/service-secrets`, niet via losse `std::env::var` calls of directe file-reads.
+- `.env` mag blijven voor non-secret config, maar productie-secrets horen uit `systemd` credentials te komen.
 
-## Prereq
-- systemd 248+
-- systemd-creds
-- TPM2 optioneel (alleen als je daar voor kiest)
+## Canoniek runtime contract
+- Gebruik `services/<service>.conf` voor verplichte secrets.
+- Gebruik `services/<service>.optional.conf.example` als voorbeeld voor optionele overlays.
+- Elke mapregel is `SECRET_NAME SECRET_NAME_FILE`.
+- Deploy-scripts genereren een `credentials.conf` drop-in via `/opt/services/vault/scripts/render_dropin.sh <service> --apply`.
+- `service-secrets` resolve't `*_FILE` eerst, daarna `CREDENTIALS_DIRECTORY`, en plain env alleen buiten productie.
 
-## Gebruik (dev)
-1) Maak een encrypted credential:
-   /opt/services/vault/scripts/create_cred.sh db_password
-   # optioneel: --with-key=tpm2
+## Voorbeeld
+```text
+DATABASE_URL DATABASE_URL_FILE
+SERVICE_TOKEN SERVICE_TOKEN_FILE
+```
 
-2) Test via een transient service (geen installatie nodig):
-   systemd-run --unit vault-cred-test --wait --collect \
-     -p LoadCredentialEncrypted=db_password:/opt/services/vault/credstore/db_password.cred \
-     /opt/services/vault/scripts/cred_test.sh db_password
+De applicatie laadt dan:
+```rust
+let secrets = LoadedSecrets::load(
+    &[
+        SecretSpec::required("DATABASE_URL"),
+        SecretSpec::required("SERVICE_TOKEN"),
+    ],
+    &app_env,
+)
+.await?;
+```
 
-3) Of installeer de test unit:
-   cp /opt/services/vault/units/vault-cred-test.service /etc/systemd/system/
-   systemctl daemon-reload
-   systemctl start vault-cred-test.service
+## Operationale regels
+- Geen nieuwe production flows via `/run/vault/<service>.env`.
+- Geen productie-secrets in `EnvironmentFile`.
+- Optionele secrets gaan niet in de base-map; lever die alleen via een expliciete overlay zodat een ontbrekende `.cred` geen startfout veroorzaakt.
+- Rotatie is restart-based; auto-refresh is hier geen vereiste.
 
-## Multi-service ontwerp
-- Alle apps delen 1 credstore in /opt/services/vault/credstore
-- Per service een map file in /opt/services/vault/services/<service>.conf
-- Genereer een systemd drop-in met /opt/services/vault/scripts/render_dropin.sh
-- De drop-in komt in /opt/services/vault/units/<service>.service.d/credentials.conf
-- De service-naam mag met of zonder .service (map file gebruikt naam zonder suffix)
-
-### Map file formaat
-- Elke regel: CRED_NAME [ENVVAR]
-- Als ENVVAR is gezet, wijst die naar /run/credentials/%N/CRED_NAME
-- Optioneel: name:path om de cred file locatie te overschrijven
-
-Voorbeeld:
-  db_password DB_PASSWORD_FILE
-  api_token API_TOKEN_FILE
-  #custom_secret:/opt/services/vault/credstore/custom_secret.cred CUSTOM_SECRET_FILE
-
-### Drop-in genereren
-  /opt/services/vault/scripts/render_dropin.sh myservice
-
-### Drop-in toepassen (optioneel)
-  /opt/services/vault/scripts/render_dropin.sh myservice --apply
-
-## Demo
-Zie /opt/services/vault/demo/README.md
-
-## Productie richting
-- Voeg LoadCredentialEncrypted toe aan je echte unit.
-- Laat je app secrets uit /run/credentials/%N/NAME lezen.
-- Zet hardening flags in je unit (NoNewPrivileges, ProtectSystem, ProtectHome, PrivateTmp).
-- Auto-start zonder handmatige unlock vereist host key of TPM2.
-  YubiKey/phone kan dan niet verplicht bij boot.
-
-## Security samenvatting
-- Threat model: beschermt tegen disk/backups, niet tegen root op dezelfde host.
-- Access control: `credstore/` 0700, `vault.toml`/`audit.log` 0600, CLI met `umask 077`, alleen root/sudo.
-- CLI safety: `get` alleen met expliciete confirmatie, geen secrets naar stdout/logs.
-- Audit: alleen metadata, append-only, voorkeur voor hash chaining of journal logging.
-- Backups: versleuteld met expliciete key policy en gelogde restore.
-- Drop-in hardening: minimaal `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`.
-- Operational: rotatie/migratie met verify en rollback (oude cred pas weg na succes).
-
-## Tests
-- CLI test suite (126 tests): `sudo /opt/test/vault-test/scripts/test-cli-full.sh` — systemd-integratie + CLI: `sudo /opt/test/vault-test/scripts/run-all-tests.sh`
-
-## Opmerking
-- host key encryption beschermt tegen casual exposure/backups, niet tegen root op dezelfde host.
-- Als host key nog niet bestaat: systemd-creds setup
+## Relevante checks
+- `cargo test --manifest-path /opt/app/vault/service-secrets/Cargo.toml`
+- `cargo test --manifest-path /opt/app/vault/Cargo.toml`
+- `sudo /opt/services/vault/scripts/smoke-check.sh --root /var/lib/goamet-vault --with-leak`

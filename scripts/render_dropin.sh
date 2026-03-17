@@ -99,7 +99,7 @@ OUT_FILE="$OUT_DIR/credentials.conf"
 
     echo "LoadCredentialEncrypted=$name:$cred_path"
     if [ $NO_ENV -eq 0 ] && [ -n "$env_var" ]; then
-      echo "Environment=$env_var=/run/credentials/%N/$name"
+      echo "Environment=$env_var=%d/$name"
     fi
   done < "$MAP_FILE"
 } > "$OUT_FILE"

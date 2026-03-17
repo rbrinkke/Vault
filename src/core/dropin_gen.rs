@@ -35,7 +35,7 @@ pub fn generate_dropin_from_entries(
         if !no_env {
             if let Some(env_var) = &entry.env_var {
                 out.push_str(&format!(
-                    "Environment={}=/run/credentials/%N/{}\n",
+                    "Environment{}=%d/{}\n",
                     env_var, entry.cred_name
                 ));
             }
@@ -76,7 +76,7 @@ mod tests {
         let result = generate_dropin(map.path(), Path::new("/creds"), false, false).unwrap();
         assert!(result.contains("[Service]"));
         assert!(result.contains("LoadCredentialEncrypted=db_password:/creds/db_password.cred"));
-        assert!(result.contains("Environment=DB_PASS_FILE=/run/credentials/%N/db_password"));
+        assert!(result.contains("Environment=DB_PASS_FILE=%d/db_password"));
     }
 
     #[test]
@@ -122,6 +122,6 @@ mod tests {
         ];
         let result = generate_dropin_from_entries(&entries, false, false);
         assert!(result.contains("LoadCredentialEncrypted=db_pass:/creds/db_pass.cred"));
-        assert!(result.contains("Environment=DB_PASS_FILE=/run/credentials/%N/db_pass"));
+        assert!(result.contains("Environment=DB_PASS_FILE=%d/db_pass"));
     }
 }

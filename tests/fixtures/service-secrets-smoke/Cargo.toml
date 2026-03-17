@@ -1,0 +1,8 @@
+[package]
+name = "service-secrets-smoke"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+service-secrets = { path = "../../../service-secrets" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
