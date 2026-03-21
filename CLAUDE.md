@@ -15,7 +15,7 @@
 ## Voorbeeld
 ```text
 DATABASE_URL DATABASE_URL_FILE
-SERVICE_TOKEN SERVICE_TOKEN_FILE
+INTERNAL_SERVICE_JWT_SECRET INTERNAL_SERVICE_JWT_SECRET_FILE
 ```
 
 De applicatie laadt dan:
@@ -23,7 +23,7 @@ De applicatie laadt dan:
 let secrets = LoadedSecrets::load(
     &[
         SecretSpec::required("DATABASE_URL"),
-        SecretSpec::required("SERVICE_TOKEN"),
+        SecretSpec::required("INTERNAL_SERVICE_JWT_SECRET"),
     ],
     &app_env,
 )

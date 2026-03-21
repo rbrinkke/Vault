@@ -40,7 +40,7 @@ PRIVATE_KEY_PASSWORD PRIVATE_KEY_PASSWORD_FILE
 MFA_ENCRYPTION_KEY MFA_ENCRYPTION_KEY_FILE
 PII_ENCRYPTION_KEY PII_ENCRYPTION_KEY_FILE
 BLIND_INDEX_KEY BLIND_INDEX_KEY_FILE
-SERVICE_TOKEN SERVICE_TOKEN_FILE
+INTERNAL_SERVICE_JWT_SECRET INTERNAL_SERVICE_JWT_SECRET_FILE
 ```
 
 Bijbehorend optional voorbeeld:
@@ -58,7 +58,7 @@ use service_secrets::{LoadedSecrets, SecretSpec};
 
 const AUTH_SECRET_SPECS: &[SecretSpec] = &[
     SecretSpec::required("DATABASE_URL"),
-    SecretSpec::required("SERVICE_TOKEN"),
+    SecretSpec::required("INTERNAL_SERVICE_JWT_SECRET"),
     SecretSpec::optional("SMTP_PASSWORD"),
 ];
 
@@ -66,7 +66,9 @@ let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
 let secrets = LoadedSecrets::load(AUTH_SECRET_SPECS, &app_env).await?;
 
 let database_url = secrets.require_plain_string("DATABASE_URL").await?;
-let service_token = secrets.require_secret_string("SERVICE_TOKEN").await?;
+let internal_service_jwt_secret = secrets
+    .require_secret_string("INTERNAL_SERVICE_JWT_SECRET")
+    .await?;
 let smtp_password = secrets.optional_secret_string("SMTP_PASSWORD").await?;
 ```
 

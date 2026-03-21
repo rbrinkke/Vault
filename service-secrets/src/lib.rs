@@ -333,24 +333,28 @@ mod tests {
     async fn file_env_var_takes_precedence_over_systemd_credentials_directory() {
         let file_dir = TempDir::new().unwrap();
         let systemd_dir = TempDir::new().unwrap();
-        let file_path = file_dir.path().join("SERVICE_TOKEN");
-        let systemd_path = systemd_dir.path().join("SERVICE_TOKEN");
+        let file_path = file_dir.path().join("INTERNAL_SERVICE_JWT_SECRET");
+        let systemd_path = systemd_dir.path().join("INTERNAL_SERVICE_JWT_SECRET");
 
         std::fs::write(&file_path, "file-token").unwrap();
         std::fs::write(&systemd_path, "dir-token").unwrap();
 
-        std::env::set_var("SERVICE_TOKEN_FILE", &file_path);
+        std::env::set_var("INTERNAL_SERVICE_JWT_SECRET_FILE", &file_path);
         set_systemd_credentials_directory(systemd_dir.path());
 
-        let secrets = LoadedSecrets::load(&[SecretSpec::required("SERVICE_TOKEN")], "production")
-            .await
-            .unwrap();
+        let secrets =
+            LoadedSecrets::load(&[SecretSpec::required("INTERNAL_SERVICE_JWT_SECRET")], "production")
+                .await
+                .unwrap();
         assert_eq!(
-            secrets.require_plain_string("SERVICE_TOKEN").await.unwrap(),
+            secrets
+                .require_plain_string("INTERNAL_SERVICE_JWT_SECRET")
+                .await
+                .unwrap(),
             "file-token"
         );
 
-        clear_runtime_vars(&["SERVICE_TOKEN"]);
+        clear_runtime_vars(&["INTERNAL_SERVICE_JWT_SECRET"]);
     }
 
     #[tokio::test]
